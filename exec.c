@@ -65,6 +65,7 @@ exec(char *path, char **argv)
   sp = sz;
 
   // Push argument strings, prepare rest of stack in ustack.
+  int cmdlen = 0;
   for(argc = 0; argv[argc]; argc++) {
     if(argc >= MAXARG)
       goto bad;
@@ -72,10 +73,17 @@ exec(char *path, char **argv)
     if(copyout(pgdir, sp, argv[argc], strlen(argv[argc]) + 1) < 0)
       goto bad;
     //take the args from stack into proc struc
-    memmove(proc->cmdline[argc],argv[argc],strlen(argv[argc]) );	//~yoed
+    
+    memmove(proc->cmdline + cmdlen, argv[argc], strlen(argv[argc]) + 1);
+    cmdlen += strlen(argv[argc]);
+    memmove(proc->cmdline + cmdlen, " ", 2);	
+    cmdlen +=1;
+    
     ustack[3+argc] = sp;
   }
-  proc->argc=argc;				//~yoed
+  //cprintf("%s\n", proc->cmdline);
+  
+  //proc->argc=argc;				//~yoed
   ustack[3+argc] = 0;
 
   ustack[0] = 0xffffffff;  // fake return PC

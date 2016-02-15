@@ -12,13 +12,14 @@
 #include "x86.h"
 
 #define NINODES 200
-#define CMD_LINE 200
-#define FD_INFO 400
-#define STATUS 600
+#define CMD_LINE 2000
+#define FD_INFO 4000
+#define STATUS 6000
 
 void pushDirentToBuf(char* dirName, int inum, char* buf, int * numDirsInBuf);
 int mockPROCfld(struct inode *ip, char * buf);
 int mockPIDfld(struct inode *ip, char * buf);
+int mockCmdLine(struct inode *ip, char * buf);
 
 extern struct {
   struct spinlock lock;
@@ -27,7 +28,7 @@ extern struct {
 
 int 
 procfsisdir(struct inode *ip) {
-  return ip->type == T_DIR;
+  return ip->type == T_DEV && ip->major == PROCFS;
 }
 
 void 
@@ -57,19 +58,30 @@ procfsread(struct inode *ip, char *dst, int off, int n) {
   if (ip->minor == 0) { // minor == 0 determines that we want to read from fld /PROC
     size = mockPROCfld(ip, buf);
   }
-  else if (ip->minor == 1) {
-    
+  else if (ip->minor == 1) { // minor == 1 determines that we want to read from fld /PROC/<PID>
+    size = mockPIDfld(ip, buf);
   }
-  else if (ip->minor == 2) {
-    
+  else if (ip->minor == 2) { // minor == 2 determines that we want to read from file /PROC/<PID>/<file>
+    int file = (ip->inum/1000)*1000;
+    switch (file) {
+      case CMD_LINE:
+	size = mockCmdLine(ip, buf);
+	break;
+      case FD_INFO:
+	break;
+      case STATUS:
+	break;
+    }
   }
   
   if (off < size) {
       int remain = size - off;
       remain = remain < n ? remain : n;
       memmove(dst, buf + off, remain);
+      //cprintf("dst is: %s\n", dst);
       return remain;
   }
+  //cprintf("buf is: %s BAD\n", buf);
   return 0;
 }
 
@@ -121,17 +133,24 @@ mockPIDfld(struct inode *ip, char * buf) {
     pushDirentToBuf(".", ip->inum, buf, &count);
     pushDirentToBuf("..", ROOTINO, buf, &count);
     
-    if (p->state == UNUSED) {
-      return count*(struct dirent);
+    if (p->state != UNUSED) {    
+      pushDirentToBuf("cmdline", ip->inum + CMD_LINE, buf, &count);
+      pushDirentToBuf("cwd", p->cwd->inum, buf, &count);
+      pushDirentToBuf("exe", p->exe->inum, buf, &count);
+      pushDirentToBuf("fdinfo", ip->inum + FD_INFO, buf, &count);   
+      pushDirentToBuf("status", ip->inum + STATUS, buf, &count);    
     }
     
-    pushDirentToBuf("cmdline", ip->inum + CMD_LINE, buf, &count);
-    pushDirentToBuf("cwd", p->cwd->inum, buf, &count);
-    pushDirentToBuf("exe", p->exe->inum, buf, &count);
-    pushDirentToBuf("cmdline", ip->inum + CMD_LINE, buf, &count);   
-    pushDirentToBuf("cmdline", ip->inum + CMD_LINE, buf, &count);
+    return count*(sizeof(struct dirent)); 
 }
 
+int
+mockCmdLine(struct inode *ip, char * buf) {
+    struct proc *p = &ptable.proc[(ip->inum - CMD_LINE) - NINODES];
+    int sz = strlen(p->cmdline);
+    memmove(buf, p->cmdline, sz);
+    return sz;
+}
 /**
  * gets directory name and inum, buffer, and a pointer to number of directories already in the buffer
  * push directory entry to buffer (as struct dirent), increase numDirsInBuf by 1 
