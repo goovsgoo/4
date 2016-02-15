@@ -1,0 +1,533 @@
+diff --git a/exec.c b/exec.c
+index 8dbbdb6..eca3ec5 100644
+--- a/exec.c
++++ b/exec.c
+@@ -10,7 +10,8 @@
+ int
+ exec(char *path, char **argv)
+ {
+-  char *s, *last;
++  char comdLine[100];
++  char *s, *last;//, comdLine[100];
+   int i, off;
+   uint argc, sz, sp, ustack[3+MAXARG+1];
+   struct elfhdr elf;
+@@ -49,6 +50,9 @@ exec(char *path, char **argv)
+     if(loaduvm(pgdir, (char*)ph.vaddr, ip, ph.off, ph.filesz) < 0)
+       goto bad;
+   }
++  //----------------------------------------------------------
++  proc->exe = idup(ip); // Adding executable to proc
++  //----------------------------------------------------------
+   iunlockput(ip);
+   end_op();
+   ip = 0;
+@@ -84,7 +88,22 @@ exec(char *path, char **argv)
+   for(last=s=path; *s; s++)
+     if(*s == '/')
+       last = s+1;
++    
++ //---------------------Save_Command-----------------------   
++  strncpy(comdLine, argv[0], strlen(argv[0])+1);
++  for(argc = 1; argv[argc]; argc++) {        // Concatinate all args 
++      strncpy(comdLine+strlen(comdLine), argv[argc], strlen(argv[argc])+1);
++      strncpy(comdLine+strlen(comdLine), " ", strlen(" ")+1);
++  }
++
++  if(comdLine[strlen(comdLine)-1]==' ')
++    comdLine[strlen(comdLine)-1] = '\0';
++  
++  safestrcpy(proc->cmdline, comdLine, sizeof(proc->cmdline));
++  //---------------------------------------------------------
++  
+   safestrcpy(proc->name, last, sizeof(proc->name));
++  
+ 
+   // Commit to the user image.
+   oldpgdir = proc->pgdir;
+@@ -92,6 +111,7 @@ exec(char *path, char **argv)
+   proc->sz = sz;
+   proc->tf->eip = elf.entry;  // main
+   proc->tf->esp = sp;
++
+   switchuvm(proc);
+   freevm(oldpgdir);
+   return 0;
+@@ -104,4 +124,4 @@ exec(char *path, char **argv)
+     end_op();
+   }
+   return -1;
+-}
++}
+\ No newline at end of file
+diff --git a/file.c b/file.c
+index 98cad1e..9e2d994 100644
+--- a/file.c
++++ b/file.c
+@@ -88,6 +88,7 @@ filestat(struct file *f, struct stat *st)
+     iunlock(f->ip);
+     return 0;
+   }
++  cprintf("error in filestat\n");
+   return -1;
+ }
+ 
+diff --git a/init.c b/init.c
+index 31da4c0..c9306e3 100644
+--- a/init.c
++++ b/init.c
+@@ -12,7 +12,7 @@ main(void)
+ {
+   int pid, wpid;
+ 
+-  mknod("proc", 2, 0);
++  mknod("proc", 2, 10);
+ 
+   if(open("console", O_RDWR) < 0){
+     mknod("console", 1, 1);
+diff --git a/ls.c b/ls.c
+index c0af772..cbcad25 100644
+--- a/ls.c
++++ b/ls.c
+@@ -30,17 +30,18 @@ ls(char *path)
+   struct dirent de;
+   struct stat st;
+   
++  
+   if((fd = open(path, 0)) < 0){
+     printf(2, "ls: cannot open %s\n", path);
+     return;
+   }
+-  
++ 
+   if(fstat(fd, &st) < 0){
+     printf(2, "ls: cannot stat %s\n", path);
+     close(fd);
+     return;
+   }
+-  
++   //printf(1,"de.name=%s, -------fd- %d\n",path,fd);
+   switch(st.type){
+   case T_FILE:
+     printf(1, "%s %d %d %d\n", fmtname(path), st.type, st.ino, st.size);
+@@ -58,8 +59,10 @@ ls(char *path)
+     while(read(fd, &de, sizeof(de)) == sizeof(de)){
+       if(de.inum == 0)
+         continue;
++     // printf(1,"de.name=%s\n",de.name);
+       memmove(p, de.name, DIRSIZ);
+       p[DIRSIZ] = 0;
++     // printf(1,"buf=%s\n",buf);
+       if(stat(buf, &st) < 0){
+         printf(1, "ls: cannot stat %s\n", buf);
+         continue;
+diff --git a/proc.h b/proc.h
+index 3b9c3ac..0e78408 100644
+--- a/proc.h
++++ b/proc.h
+@@ -66,6 +66,9 @@ struct proc {
+   struct file *ofile[NOFILE];  // Open files
+   struct inode *cwd;           // Current directory
+   char name[16];               // Process name (debugging)
++  //---------------------------File_System---------------------------
++  struct inode *exe;           // Execute i-node
++  char cmdline[100];           // Command line & Arguments
+ };
+ 
+ // Process memory is laid out contiguously, low addresses first:
+diff --git a/procfs.c b/procfs.c
+index 23301b0..a31a482 100644
+--- a/procfs.c
++++ b/procfs.c
+@@ -11,23 +11,113 @@
+ #include "proc.h"
+ #include "x86.h"
+ 
++//-------------------------Definitions------------------------
++#define PROC 0
++#define PROC_PID 1
++#define PROC_ACTION 2
++#define PROC_FD 3
++
++#define CMD_LINE_OFF 300
++#define FD_INFO_OFF 600
++#define STATUS_OFF 900
++
++#define CMD_LINE 2
++#define FD_INFO 3
++#define STATUS 4
++
++#define INODE_START 300      // There are 200 inodes in Disk usage!
++
++extern struct {
++  struct spinlock lock;
++  struct proc proc[NPROC];
++} ptable;
++
++char * itoa (int value, char *result, int base);
++int read_proc(struct inode* ip, char* buf);
++int read_pid(struct inode* ip, char* buf);
++int read_cmd_line(struct inode* ip, char* buf);
++int read_status(struct inode* ip, char* buf);
++int read_fdinfo(struct inode* ip, char* buf);
++int read_file(struct inode* ip, char* buf);
++void addDirentToBuf(char* name, int inum, char* buf, int dirCount);
++int addResToBuf(char* dst, char* buf, int offset, int n, int type, int size);
++//------------------------------------------------------------
++
+ int 
+ procfsisdir(struct inode *ip) {
+-  return 0;
++  return ip->type==T_DEV && ip->major == 2;
+ }
+ 
+ void 
+ procfsiread(struct inode* dp, struct inode *ip) {
++  if (ip->inum < INODE_START) return;
++  ip->flags = I_VALID;
++  ip->type = T_DEV;
++  ip->ref = 1;
++  if (ip->inum < dp->inum)
++  {
++    ip->minor = dp->minor%10 - 1 + 180;
++  }
++  else
++    ip->minor = dp->minor%10 + 1 + dp->inum * 10;
++  ip->major = PROCFS;
+ }
+ 
+ int
+ procfsread(struct inode *ip, char *dst, int off, int n) {
+-  return 0;
++  
++  int size,file,bytesSent;
++  char buf[BSIZE];
++  
++  switch(ip->minor % 10)
++  {
++    case PROC:
++      size = read_proc(ip,buf);
++      bytesSent=addResToBuf(dst,buf,off,n,0,size);
++      break;
++      
++    case PROC_PID:
++      size = read_pid(ip,buf);
++      bytesSent=addResToBuf(dst,buf,off,n,0,size);
++      break;
++      
++    case PROC_ACTION:
++      file = ip->inum / INODE_START - 1;
++      switch(file)
++      {
++	case CMD_LINE_OFF/INODE_START:
++	  size = read_cmd_line(ip,buf);
++	  bytesSent=addResToBuf(dst,buf,off,n,1,size);
++	  break;
++	  
++	case FD_INFO_OFF/INODE_START:
++	  size = read_fdinfo(ip,buf);	
++	  bytesSent=addResToBuf(dst,buf,off,n,0,size);
++	  break;
++	  
++	case STATUS_OFF/INODE_START:
++	  size = read_status(ip,buf);
++	  bytesSent=addResToBuf(dst,buf,off,n,1,size);
++	  break;
++      }
++      break;
++      
++    case PROC_FD:
++      size = read_file(ip,buf);
++      bytesSent=addResToBuf(dst,buf,off,n,1,size);
++      break;
++    
++  }
++  
++  
++  
++  return bytesSent;
+ }
+ 
+ int
+ procfswrite(struct inode *ip, char *buf, int n)
+ {
++  panic("write is not supported");
+   return 0;
+ }
+ 
+@@ -39,3 +129,274 @@ procfsinit(void)
+   devsw[PROCFS].write = procfswrite;
+   devsw[PROCFS].read = procfsread;
+ }
++
++//--------------------------------------------
++int
++read_proc(struct inode* ip, char* buf) 
++{
++  
++  int directoryCount = 0;
++  addDirentToBuf(".",ip->inum,buf,0);
++  directoryCount++;
++  
++  addDirentToBuf("..",ip->minor / 10,buf,directoryCount);
++  directoryCount++;
++  
++  struct proc* p;
++  int index = 0;
++  
++  char tmp[BSIZE];
++  
++  for (p = ptable.proc; p < &ptable.proc[NPROC]; p++){
++    if(p->state != UNUSED)
++    {
++      itoa(p->pid,tmp,10);
++      addDirentToBuf(tmp,INODE_START+index,buf,directoryCount);
++      directoryCount++;
++    }
++    index = index + 1 ;
++  }
++  
++  return directoryCount;
++}
++//--------------------------------------------
++int
++read_pid(struct inode* ip, char* buf) 
++{
++  struct proc* p;
++  
++  p = &ptable.proc[ip->inum - INODE_START];
++  
++  int directoryCount = 0;
++  addDirentToBuf(".",ip->inum,buf,0);
++  directoryCount++;
++  
++  addDirentToBuf("..",ip->minor / 10,buf,directoryCount);
++  directoryCount++;
++  
++  if(p->state == UNUSED)
++    return directoryCount;
++  
++  addDirentToBuf("cmdline",ip->inum + CMD_LINE_OFF,buf,directoryCount);
++  directoryCount++;
++  
++  addDirentToBuf("cwd",p->cwd->inum,buf,directoryCount);
++  directoryCount++;
++  
++  addDirentToBuf("exe",p->exe->inum,buf,directoryCount);
++  directoryCount++;
++  
++  addDirentToBuf("fdinfo",ip->inum + FD_INFO_OFF,buf,directoryCount);
++  directoryCount++;
++  
++  addDirentToBuf("status",ip->inum + STATUS_OFF,buf,directoryCount);
++  directoryCount++;
++  
++  return directoryCount;
++}
++
++//--------------------------------------------
++
++int
++read_cmd_line(struct inode* ip, char* buf) 
++{
++  struct proc* p;
++  p = &ptable.proc[ip->inum - INODE_START - CMD_LINE_OFF];
++  strncpy(buf, p->cmdline, strlen(p->cmdline));
++  return strlen(buf);
++}
++
++//--------------------------------------------
++
++int
++read_status(struct inode* ip, char* buf) 
++{
++  struct proc* p;
++  p = &ptable.proc[ip->inum - INODE_START - STATUS_OFF];
++  
++  //get size
++  char sz[BSIZE];
++  itoa(p->sz,sz,10);
++  
++  //get state
++  char* state;
++  switch (p->state) {
++    
++    case UNUSED:
++      state = "unused";
++      break;
++      
++    case EMBRYO:
++      state = "embryo";
++      break;
++      
++    case SLEEPING:
++      state = "sleep";
++      break;
++      
++    case RUNNABLE:
++      state = "runble";
++      break;
++      
++    case RUNNING:
++      state = "run";
++      break;
++      
++    case ZOMBIE:
++      state = "zombie";
++      break;
++    
++  }
++  
++  //update buf according to process status
++  strncpy(buf,"state: ",strlen("state: ")+1);
++  strncpy(buf+strlen(buf),state,strlen(state)+1);
++  strncpy(buf+strlen(buf),", size: ",strlen(", size: ")+1);
++  strncpy(buf+strlen(buf),sz,strlen(sz)+1);
++  strncpy(buf+strlen(buf),".\n",strlen(".\n")+1);
++  
++  return strlen(buf);
++}
++
++//------------------------------------------------------------
++
++int read_fdinfo(struct inode* ip, char* buf){
++  struct proc *p;
++  int directoryCount = 0, index;
++  
++  char tmp[32];
++  
++  p = &ptable.proc[ip->inum - FD_INFO_OFF - INODE_START];
++  
++  addDirentToBuf(".",ip->inum,buf,0);
++  directoryCount++;
++  addDirentToBuf("..",ip->minor / 10,buf,directoryCount);
++  directoryCount++;
++  
++  for (index = 0; index < NOFILE; index++){
++    if (p->ofile[index] != FD_NONE) {
++      itoa(index,tmp,10);
++      addDirentToBuf(tmp,ip->inum*NOFILE + index,buf,directoryCount);
++      directoryCount++;
++    }
++  }
++  return directoryCount;
++}
++
++
++
++
++
++//-----------------------File_Type_2_String-------------------
++char* enum2String(int tpe)
++{
++  switch(tpe)
++  {            
++    case 0:   return "FD_NONE";
++    case 1:   return "FD_PIPE";
++    case 2:   return "FD_INODE";
++    default:  return "No such type"; 
++  }
++}
++
++//-------------------------Read_File--------------------------
++
++int read_file(struct inode* ip, char* buf){
++  
++  struct file *fd;
++  struct proc *p;
++  char *fd_type;
++  
++  p = &ptable.proc[(ip->inum) / NOFILE - STATUS_OFF];
++
++  fd = p->ofile[ip->inum % NOFILE];
++
++  fd_type = enum2String(fd->type);
++  
++  /*--------------------------Type----------------------------*/
++  strncpy(buf, "Type: ", 7);
++  strncpy(buf+strlen(buf), fd_type, strlen(fd_type)+1);
++
++  /*------------------------Offset----------------------------*/
++  char fd_off[100];
++  strncpy(buf +strlen(buf), ", Offset: ", 11);
++  itoa(fd->off,fd_off,10);
++  //intToStr(fd->off, fd_off);
++  strncpy(buf+strlen(buf), fd_off, strlen(fd_off)+1);
++  strncpy(buf+strlen(buf), "\n", strlen("\n")+1);
++  /*-------------------------Flags----------------------------*/
++              /*Readable info*/
++  strncpy(buf+strlen(buf), "Readable: ", 14);
++  if (fd->readable) strncpy(buf+strlen(buf), "true", 5);
++  else strncpy(buf+strlen(buf), "false", 6);
++              /*Writeable*/
++  strncpy(buf+strlen(buf), ", Writable: ", 16);
++  if (fd->writable) strncpy(buf+strlen(buf), "true", 5);
++  else strncpy(buf+strlen(buf), "false", 6);
++  strncpy(buf+strlen(buf), "\n", strlen("\n")+1);
++  
++  return strlen(buf);
++}
++//------------------------------------------------------------
++
++//--------------------------------------------
++void
++addDirentToBuf(char* name, int inum, char* buf, int dirCount)
++{
++  struct dirent current_dir;
++  current_dir.inum = inum;
++  memmove(current_dir.name, name, strlen(name)+1);
++  memmove(buf + dirCount * sizeof(current_dir),(char*)&current_dir, sizeof(current_dir));
++}
++//--------------------------------------------
++
++//type: 0 -> directory, 1 -> file
++int
++addResToBuf(char* dst, char* buf, int offset, int n, int type, int size) 
++{
++  struct dirent directory;
++  int bytes_to_send, updatedSize;
++  
++  if(type==0)
++    updatedSize = size * sizeof(directory);
++  else
++    updatedSize = size;
++  
++  if (offset < updatedSize) {
++    bytes_to_send = updatedSize-offset;
++    if (bytes_to_send < n) {
++      memmove(dst,buf+offset,bytes_to_send);
++      return size;
++    }
++    memmove(dst,buf+offset,n);
++    return n; 
++  }
++  return 0;
++}
++
++//--------------------------------------------
++char *
++itoa (int value, char *result, int base)
++{
++    // check that the base if valid
++    if (base < 2 || base > 36) { *result = '\0'; return result; }
++
++    char* ptr = result, *ptr1 = result, tmp_char;
++    int tmp_value;
++
++    do {
++        tmp_value = value;
++        value /= base;
++        *ptr++ = "zyxwvutsrqponmlkjihgfedcba9876543210123456789abcdefghijklmnopqrstuvwxyz" [35 + (tmp_value - value * base)];
++    } while ( value );
++
++    // Apply negative sign
++    if (tmp_value < 0) *ptr++ = '-';
++    *ptr-- = '\0';
++    while (ptr1 < ptr) {
++        tmp_char = *ptr;
++        *ptr--= *ptr1;
++        *ptr1++ = tmp_char;
++    }
++    return result;
++}
+\ No newline at end of file
