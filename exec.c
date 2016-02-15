@@ -26,6 +26,9 @@ exec(char *path, char **argv)
   ilock(ip);
   pgdir = 0;
 
+
+  proc->exe= idup(ip); //Handle and change the exe cell by dup inode ~ yoed
+
   // Check ELF header
   if(readi(ip, (char*)&elf, 0, sizeof(elf)) < sizeof(elf))
     goto bad;
@@ -68,8 +71,11 @@ exec(char *path, char **argv)
     sp = (sp - (strlen(argv[argc]) + 1)) & ~3;
     if(copyout(pgdir, sp, argv[argc], strlen(argv[argc]) + 1) < 0)
       goto bad;
+    //take the args from stack into proc struc
+    memmove(proc->cmdline[argc],argv[argc],strlen(argv[argc]) );	//~yoed
     ustack[3+argc] = sp;
   }
+  proc->argc=argc;				//~yoed
   ustack[3+argc] = 0;
 
   ustack[0] = 0xffffffff;  // fake return PC
