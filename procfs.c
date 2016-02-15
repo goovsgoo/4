@@ -20,11 +20,15 @@ void pushDirentToBuf(char* dirName, int inum, char* buf, int * numDirsInBuf);
 int mockPROCfld(struct inode *ip, char * buf);
 int mockPIDfld(struct inode *ip, char * buf);
 int mockCmdLine(struct inode *ip, char * buf);
+int mockFdInfo(struct inode *ip, char *buf);
+int mockFdStatus(struct inode *ip, char * buf);
 
 extern struct {
   struct spinlock lock;
   struct proc proc[NPROC];
 } ptable;
+
+char * fd_enums[3] = {"FD_NONE", "FD_PIPE", "FD_INODE"};
 
 int 
 procfsisdir(struct inode *ip) {
@@ -68,10 +72,15 @@ procfsread(struct inode *ip, char *dst, int off, int n) {
 	size = mockCmdLine(ip, buf);
 	break;
       case FD_INFO:
+	size = mockFdInfo(ip, buf);
 	break;
       case STATUS:
 	break;
     }
+  }
+  else if (ip->minor >= 3) {  
+    //cprintf("HEELO!\n");
+    size = mockFdStatus(ip, buf);
   }
   
   if (off < size) {
@@ -151,6 +160,82 @@ mockCmdLine(struct inode *ip, char * buf) {
     memmove(buf, p->cmdline, sz);
     return sz;
 }
+
+int
+mockFdInfo(struct inode *ip, char *buf) {
+    int count = 0;
+    pushDirentToBuf(".", ip->inum, buf, &count);
+    pushDirentToBuf("..", ROOTINO, buf, &count);
+    
+    int procIndex = ip->inum - FD_INFO - NINODES;
+    //cprintf("proc index is: %d\n", procIndex);
+    struct proc *p = &ptable.proc[procIndex];
+    int i = 0;  
+    char sFD[2];
+    
+    for (i = 0; i < NOFILE; i++){
+      if(p->ofile[i] && p->ofile[i]->type != FD_NONE)
+      {		
+	itoa(i, sFD);
+	int inum = FD_INFO + NINODES + NPROC + NOFILE * procIndex + i; // 4000 + 200 + 64 + 20*procIndex + i
+	pushDirentToBuf(sFD, inum, buf, &count);
+      }
+      i++;
+    }
+    return count * sizeof(struct dirent);
+}
+
+
+int
+mockFdStatus(struct inode *ip, char * buf) {
+  
+    // NOFILE * procIndex + fdNum = inum - FD_INFO - NINODES - NPROC
+    int procIndex = (ip->inum - FD_INFO - NINODES - NPROC) / NOFILE;
+    int fdNum = (ip->inum - FD_INFO - NINODES - NPROC) % NOFILE;
+    
+    struct proc *p = &ptable.proc[procIndex];
+    struct file *fd = p->ofile[fdNum];
+    
+    int sz = 0;
+    memmove(buf, "type: ", strlen("type: ") + 1);
+    sz += strlen("type: ") + 1;
+    
+    memmove(buf + sz,fd_enums[fd->type], strlen(fd_enums[fd->type]) + 1);
+    sz += strlen(fd_enums[fd->type]) + 1;
+    
+    memmove(buf + sz, "\noffet: ", strlen("\noffet: ") + 1);
+    sz += strlen("\noffet: ") + 1;
+    
+    char off[100];
+    itoa((int)fd->off, off);
+    memmove(buf + sz, off, strlen(off) + 1);
+    sz += strlen(off) + 1;
+    
+    memmove(buf + sz, "\nflags: ", strlen("\nflags: ") + 1);
+    sz += strlen("\nflags: ") + 1;
+        
+    memmove(buf + sz, "readable: ", strlen(" readable: ") + 1);
+    sz += strlen(" readable: ") + 1;
+    
+    char read[1];
+    itoa(fd->readable, read);
+    memmove(buf + sz, read, strlen(read) + 1);
+    sz += strlen(read) + 1;
+    
+    memmove(buf + sz, " writable: ", strlen(" writable: ") + 1);
+    sz += strlen(" writable: ") + 1;
+    
+    char write[1];
+    itoa(fd->writable, write);
+    memmove(buf + sz, write, strlen(write) + 1);
+    sz += strlen(write) + 1;
+    
+    memmove(buf + sz, "\n", strlen("\n") + 1);
+    sz += strlen("\n") + 1;
+    
+    return sz;
+}
+
 /**
  * gets directory name and inum, buffer, and a pointer to number of directories already in the buffer
  * push directory entry to buffer (as struct dirent), increase numDirsInBuf by 1 
