@@ -22,6 +22,7 @@ int mockPIDfld(struct inode *ip, char * buf);
 int mockCmdLine(struct inode *ip, char * buf);
 int mockFdInfo(struct inode *ip, char *buf);
 int mockFdStatus(struct inode *ip, char * buf);
+int mockStatusInfo(struct inode *ip, char * buf);
 
 extern struct {
   struct spinlock lock;
@@ -29,7 +30,8 @@ extern struct {
 } ptable;
 
 char * fd_enums[3] = {"FD_NONE", "FD_PIPE", "FD_INODE"};
-
+char * proc_run_state[6] = { "UNUSED", "EMBRYO", "SLEEPING", "RUNNABLE", "RUNNING", "ZOMBIE" };
+  
 int 
 procfsisdir(struct inode *ip) {
   return ip->type == T_DEV && ip->major == PROCFS;
@@ -75,6 +77,7 @@ procfsread(struct inode *ip, char *dst, int off, int n) {
 	size = mockFdInfo(ip, buf);
 	break;
       case STATUS:
+	size = mockStatusInfo(ip, buf);
 	break;
     }
   }
@@ -161,6 +164,32 @@ mockCmdLine(struct inode *ip, char * buf) {
     return sz;
 }
 
+int 
+mockStatusInfo(struct inode *ip, char * buf) {
+    struct proc *p = &ptable.proc[(ip->inum - STATUS) - NINODES];
+    
+    int sz = 0;
+    memmove(buf, "run state: ", strlen("run state: ") + 1);
+    sz += strlen("run state: ") + 1;
+    
+    char * str = proc_run_state[p->state];  
+    memmove(buf + sz, str, strlen(str) + 1);
+    sz += strlen(str) + 1;
+    
+    memmove(buf + sz, " memory usage: ", strlen(" memory usage: ") + 1);
+    sz += strlen(" memory usage: ") + 1;
+    
+    char proc_sz[6];
+    itoa((int)p->sz, proc_sz);
+    memmove(buf + sz, proc_sz, strlen(proc_sz) + 1);
+    sz += strlen(proc_sz) + 1;
+    
+    memmove(buf + sz, "\n", strlen("\n") + 1);
+    sz += strlen("\n") + 1;
+    
+    return sz;
+}
+
 int
 mockFdInfo(struct inode *ip, char *buf) {
     int count = 0;
@@ -174,13 +203,13 @@ mockFdInfo(struct inode *ip, char *buf) {
     char sFD[2];
     
     for (i = 0; i < NOFILE; i++){
+      //cprintf("fd is %d, file %d, for proc %d\n", i, p->ofile[i], p->pid);
       if(p->ofile[i] && p->ofile[i]->type != FD_NONE)
       {		
-	itoa(i, sFD);
-	int inum = FD_INFO + NINODES + NPROC + NOFILE * procIndex + i; // 4000 + 200 + 64 + 20*procIndex + i
+	itoa(i, sFD);	
+	int inum = FD_INFO + NINODES + NPROC + NOFILE * procIndex + i; // 4000 + 200 + 64 + 16*procIndex + i
 	pushDirentToBuf(sFD, inum, buf, &count);
       }
-      i++;
     }
     return count * sizeof(struct dirent);
 }
@@ -203,8 +232,8 @@ mockFdStatus(struct inode *ip, char * buf) {
     memmove(buf + sz,fd_enums[fd->type], strlen(fd_enums[fd->type]) + 1);
     sz += strlen(fd_enums[fd->type]) + 1;
     
-    memmove(buf + sz, "\noffet: ", strlen("\noffet: ") + 1);
-    sz += strlen("\noffet: ") + 1;
+    memmove(buf + sz, "\noffset: ", strlen("\noffset: ") + 1);
+    sz += strlen("\noffset: ") + 1;
     
     char off[100];
     itoa((int)fd->off, off);
